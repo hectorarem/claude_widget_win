@@ -2,7 +2,7 @@
 
 A lightweight, always-on-top Windows overlay that monitors your Claude Code usage in real time. It reads your local Claude session files and queries the Claude CLI directly to show token consumption, cost estimates, and context window breakdown — all without leaving your workflow.
 
-![Widget tabs: Usage and Context](https://i.imgur.com/placeholder.png)
+![Widget tabs: Usage and Context](https://github.com/hectorarem/claude_widget_win/blob/main/image.png)
 
 ---
 
