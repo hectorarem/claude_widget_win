@@ -16,10 +16,10 @@ from threading import Thread, Event
 
 from PyQt6.QtWidgets import (
     QApplication, QFrame, QHBoxLayout, QLabel, QMenu,
-    QSizePolicy, QStackedWidget, QVBoxLayout, QWidget,
+    QSizePolicy, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget,
 )
 from PyQt6.QtCore import Qt, QRect, QTimer, QThread, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QColor, QCursor, QPainter
+from PyQt6.QtGui import QColor, QCursor, QIcon, QPainter, QPixmap
 
 try:
     import winpty
@@ -435,6 +435,7 @@ class ClaudeWidget(QWidget):
         self._build_ui()
         self._init_timers()
         self._init_watcher()
+        self._init_tray()
 
         self._file_changed.connect(self._on_file_change)
 
@@ -686,6 +687,61 @@ class ClaudeWidget(QWidget):
     def mouseReleaseEvent(self, _):
         self._drag_pos = None
 
+    # ── System tray ───────────────────────────────────────────────────────────
+
+    def _init_tray(self):
+        px = QPixmap(22, 22)
+        px.fill(Qt.GlobalColor.transparent)
+        p = QPainter(px)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(QColor(C["accent"]))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.drawEllipse(1, 1, 20, 20)
+        p.setPen(QColor(C["bg"]))
+        f = p.font(); f.setPointSize(10); f.setBold(True); p.setFont(f)
+        p.drawText(px.rect(), Qt.AlignmentFlag.AlignCenter, "C")
+        p.end()
+
+        self._tray = QSystemTrayIcon(QIcon(px), self)
+        self._tray.setToolTip("Claude Widget")
+
+        menu = QMenu()
+        menu.setStyleSheet(
+            f"QMenu{{background:{C['bg2']};color:{C['text']};"
+            f"border:1px solid {C['dim']};}}"
+            f"QMenu::item:selected{{background:{C['accent']};color:{C['bg']};}}"
+        )
+        menu.addAction("Llevar al frente", self._bring_to_front)
+        menu.addAction("Actualizar",       self._refresh_all)
+        menu.addSeparator()
+        menu.addAction("Cerrar",           self._quit)
+
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(self._on_tray_activated)
+        self._tray.show()
+
+    def _bring_to_front(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def _refresh_all(self):
+        self._do_stats()
+        self._do_claude()
+
+    def _quit(self):
+        if hasattr(self, "_watcher"):
+            self._watcher.stop()
+        QApplication.quit()
+
+    @pyqtSlot(QSystemTrayIcon.ActivationReason)
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            if self.isVisible():
+                self.hide()
+            else:
+                self._bring_to_front()
+
     def contextMenuEvent(self, e):
         m = QMenu(self)
         m.setStyleSheet(
@@ -700,9 +756,13 @@ class ClaudeWidget(QWidget):
         m.exec(e.globalPos())
 
     def closeEvent(self, e):
-        if hasattr(self, "_watcher"):
-            self._watcher.stop()
-        e.accept()
+        if hasattr(self, "_tray") and self._tray.isVisible():
+            self.hide()
+            e.ignore()
+        else:
+            if hasattr(self, "_watcher"):
+                self._watcher.stop()
+            e.accept()
 
     # ── Timers ────────────────────────────────────────────────────────────────
 
@@ -838,7 +898,7 @@ if __name__ == "__main__":
         pass
 
     app = QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(True)
+    app.setQuitOnLastWindowClosed(False)
     widget = ClaudeWidget()
     widget.show()
     sys.exit(app.exec())
