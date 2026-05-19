@@ -9,6 +9,7 @@ Improvements over the tkinter version:
 - QThread + pyqtSignal: thread-safe, no tkinter after() stacking
 - Cached results shown instantly on tab switch while refresh runs in background
 """
+from __future__ import annotations
 import ctypes, ctypes.wintypes as wt, json, os, re, sys, time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,7 +36,7 @@ SESSIONS_DIR = CLAUDE_DIR / "sessions"
 PRICE = {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30}
 
 REFRESH_STATS_MS  = 15_000   # JSONL re-scan interval (also fired by file watcher)
-REFRESH_CLAUDE_MS = 60_000   # /usage + /context PTY interval
+REFRESH_CLAUDE_MS = 180_000  # /usage + /context PTY interval
 
 FONT = "Segoe UI"
 
@@ -324,7 +325,7 @@ def _run_claude_command(cmd: str, finish_keyword: str,
         if has_trust:
             pty.write("\r")
 
-        _, ready = _pty_read_until(pty, "bypass permissions", timeout=20)
+        _, ready = _pty_read_until(pty, "for shortcuts", timeout=20)
         if not ready:
             return None
 
