@@ -554,9 +554,9 @@ class ClaudeWidget(QWidget):
         for key, label, color, bold in [
             ("inp",  "↑  Input tokens",  "text",   False),
             ("out",  "↓  Output tokens", "text",   False),
-            ("cw",   "✎  Cache escrito", "dim",    False),
-            ("cr",   "≋  Cache leido",   "dim",    False),
-            ("cost", "$  Costo est.",    "accent", True),
+            ("cw",   "✎  Cache write",  "dim",    False),
+            ("cr",   "≋  Cache read",   "dim",    False),
+            ("cost", "$  Est. cost",    "accent", True),
         ]:
             row = QFrame(); row.setStyleSheet("background:transparent; border:none;")
             rl  = QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
@@ -657,7 +657,7 @@ class ClaudeWidget(QWidget):
             f"background:{C['bg2']}; border-radius:0 0 8px 8px; border:none;"
         )
         hl = QHBoxLayout(foot); hl.setContentsMargins(8, 0, 8, 0)
-        self._footer = _lbl("Cargando…", "dim", 7)
+        self._footer = _lbl("Loading…", "dim", 7)
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hl.addWidget(self._footer, 0, Qt.AlignmentFlag.AlignCenter)
         return foot
@@ -711,10 +711,10 @@ class ClaudeWidget(QWidget):
             f"border:1px solid {C['dim']};}}"
             f"QMenu::item:selected{{background:{C['accent']};color:{C['bg']};}}"
         )
-        menu.addAction("Llevar al frente", self._bring_to_front)
-        menu.addAction("Actualizar",       self._refresh_all)
+        menu.addAction("Bring to front", self._bring_to_front)
+        menu.addAction("Refresh",        self._refresh_all)
         menu.addSeparator()
-        menu.addAction("Cerrar",           self._quit)
+        menu.addAction("Quit",           self._quit)
 
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
@@ -749,10 +749,10 @@ class ClaudeWidget(QWidget):
             f"border:1px solid {C['dim']};}}"
             f"QMenu::item:selected{{background:{C['accent']};color:{C['bg']};}}"
         )
-        m.addAction("Actualizar stats",  self._do_stats)
-        m.addAction("Actualizar Claude", self._do_claude)
+        m.addAction("Refresh stats",  self._do_stats)
+        m.addAction("Refresh Claude", self._do_claude)
         m.addSeparator()
-        m.addAction("Cerrar", self.close)
+        m.addAction("Close", self.close)
         m.exec(e.globalPos())
 
     def closeEvent(self, e):
@@ -812,10 +812,10 @@ class ClaudeWidget(QWidget):
             return
         # Show loading indicator only on first load (no cached data yet)
         if self._cache_usage is None and self._stack.currentIndex() == 0:
-            self._bar_s["pct"].setText("cargando…")
-            self._bar_w["pct"].setText("cargando…")
+            self._bar_s["pct"].setText("loading…")
+            self._bar_w["pct"].setText("loading…")
         if self._cache_context is None and self._stack.currentIndex() == 1:
-            self._ctx_total.setText("cargando…")
+            self._ctx_total.setText("loading…")
         self._claude_worker = _ClaudeWorker(self)
         self._claude_worker.usage_done.connect(self._on_usage)
         self._claude_worker.context_done.connect(self._on_context)
@@ -835,8 +835,8 @@ class ClaudeWidget(QWidget):
             f"color:{dot_color}; font:8pt '{FONT}'; background:transparent; border:none;"
         )
         ts  = datetime.now().strftime("%H:%M:%S")
-        act = f"{d['active']} activa(s)" if d["active"] > 0 else "inactivo"
-        self._footer.setText(f"{ts}  ·  {d['sessions']} sesion(es)  ·  {act}")
+        act = f"{d['active']} active" if d["active"] > 0 else "inactive"
+        self._footer.setText(f"{ts}  ·  {d['sessions']} session(s)  ·  {act}")
 
     @pyqtSlot(object)
     def _on_usage(self, data):
@@ -852,8 +852,8 @@ class ClaudeWidget(QWidget):
 
     def _apply_usage(self, data):
         if not data:
-            self._bar_s["pct"].setText("sin datos")
-            self._bar_w["pct"].setText("sin datos")
+            self._bar_s["pct"].setText("no data")
+            self._bar_w["pct"].setText("no data")
             return
         for bar, pk, rk in [
             (self._bar_s, "session_pct", "session_reset"),
@@ -867,7 +867,7 @@ class ClaudeWidget(QWidget):
 
     def _apply_context(self, data):
         if not data:
-            self._ctx_model.setText("sin datos")
+            self._ctx_model.setText("no data")
             self._ctx_modelid.setText("")
             self._ctx_total.setText("—")
             self._ctx_tot_pct.setText("")
