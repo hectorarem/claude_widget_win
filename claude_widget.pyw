@@ -267,6 +267,18 @@ def _pty_read_until(pty, keyword: str, timeout: float) -> tuple[str, bool]:
     return buf, False
 
 
+def _pty_read_until_any(pty, keywords: list[str], timeout: float) -> tuple[str, bool]:
+    buf = ""; deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        chunk = pty.read(blocking=False)
+        if chunk:
+            buf += chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+            if any(kw in buf for kw in keywords):
+                return buf, True
+        time.sleep(0.1)
+    return buf, False
+
+
 def _pty_read_for(pty, secs: float) -> str:
     buf = ""; deadline = time.monotonic() + secs
     while time.monotonic() < deadline:
@@ -351,7 +363,9 @@ def _run_claude_command(cmd: str, finish_keyword: str,
         if has_trust:
             pty.write("\r")
 
-        _, ready = _pty_read_until(pty, "for shortcuts", timeout=20)
+        _, ready = _pty_read_until_any(
+            pty, ["for shortcuts", "bypass permissions"], timeout=20
+        )
         if not ready:
             return None
 
