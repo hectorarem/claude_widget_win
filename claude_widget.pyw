@@ -10,7 +10,10 @@ Improvements over the tkinter version:
 - Cached results shown instantly on tab switch while refresh runs in background
 """
 from __future__ import annotations
-import ctypes, ctypes.wintypes as wt, json, os, re, sys, time, winreg
+import ctypes, json, os, re, subprocess, sys, time
+if sys.platform == "win32":
+    import ctypes.wintypes as wt
+    import winreg
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread, Event
@@ -28,12 +31,15 @@ try:
 except ImportError:
     _WINPTY = False
 
-# ── Startup (registry) ───────────────────────────────────────────────────────
-_RUN_KEY      = r"Software\Microsoft\Windows\CurrentVersion\Run"
-_RUN_NAME     = "ClaudeWidget"
-_VBS_LAUNCHER = Path(sys.argv[0]).resolve().parent / "claude_widget.vbs"
+# ── Startup (registry — Windows only) ────────────────────────────────────────
+if sys.platform == "win32":
+    _RUN_KEY      = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _RUN_NAME     = "ClaudeWidget"
+    _VBS_LAUNCHER = Path(sys.argv[0]).resolve().parent / "claude_widget.vbs"
 
 def _startup_enabled() -> bool:
+    if sys.platform != "win32":
+        return False
     try:
         with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
             winreg.QueryValueEx(k, _RUN_NAME)
@@ -42,6 +48,8 @@ def _startup_enabled() -> bool:
         return False
 
 def _set_startup(enable: bool) -> None:
+    if sys.platform != "win32":
+        return
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY,
                         access=winreg.KEY_SET_VALUE) as k:
         if enable:
@@ -341,6 +349,79 @@ def _parse_context(text: str) -> dict:
     return r
 
 
+# ── PTY abstraction (Windows: winpty  |  macOS/Linux: pty + subprocess) ───────
+
+class _WinPty:
+    def __init__(self):
+        self._p = winpty.PTY(220, 50)
+        self._p.spawn("cmd.exe /c claude")
+
+    def read(self, blocking=False) -> str:
+        chunk = self._p.read(blocking=blocking)
+        if not chunk:
+            return ""
+        return chunk if isinstance(chunk, str) else chunk.decode("utf-8", errors="replace")
+
+    def write(self, text: str) -> None:
+        self._p.write(text)
+
+    def close(self) -> None:
+        try:
+            self._p.write("/exit\r"); time.sleep(0.3)
+        except Exception:
+            pass
+
+
+class _UnixPty:
+    def __init__(self):
+        import pty, select
+        master, slave = pty.openpty()
+        self._master = master
+        self._select = select
+        self._proc   = subprocess.Popen(
+            ["claude"],
+            stdin=slave, stdout=slave, stderr=slave,
+            close_fds=True, cwd=str(Path.home()),
+        )
+        os.close(slave)
+
+    def read(self, blocking=False) -> str:
+        timeout = None if blocking else 0
+        r, _, _ = self._select.select([self._master], [], [], timeout)
+        if r:
+            try:
+                return os.read(self._master, 4096).decode("utf-8", errors="replace")
+            except OSError:
+                return ""
+        return ""
+
+    def write(self, text: str) -> None:
+        os.write(self._master, text.encode())
+
+    def close(self) -> None:
+        try:
+            self.write("/exit\r"); time.sleep(0.3)
+        except Exception:
+            pass
+        try:
+            self._proc.terminate()
+        except Exception:
+            pass
+        try:
+            os.close(self._master)
+        except Exception:
+            pass
+
+
+def _make_pty():
+    if sys.platform == "win32":
+        return _WinPty() if _WINPTY else None
+    try:
+        return _UnixPty()
+    except Exception:
+        return None
+
+
 def _run_claude_command(cmd: str, finish_keyword: str,
                         finish_timeout: float) -> str | None:
     """
@@ -350,15 +431,22 @@ def _run_claude_command(cmd: str, finish_keyword: str,
     A new PTY is used per command because Claude Code does not reliably accept
     a second slash command in the same interactive session.
     """
-    if not _WINPTY:
-        return None
-    try:
+    if sys.platform == "win32":
         old_cwd = os.getcwd()
         os.chdir(str(Path.home()))
-        pty = winpty.PTY(220, 50)
-        pty.spawn("cmd.exe /c claude")
-        os.chdir(old_cwd)
 
+    pty = _make_pty()
+
+    if sys.platform == "win32":
+        try:
+            os.chdir(old_cwd)
+        except Exception:
+            pass
+
+    if pty is None:
+        return None
+
+    try:
         _, has_trust = _pty_read_until(pty, "trust", timeout=6)
         if has_trust:
             pty.write("\r")
@@ -374,15 +462,11 @@ def _run_claude_command(cmd: str, finish_keyword: str,
         if done:
             out += _pty_read_for(pty, 1.5)
 
-        try:
-            pty.write("/exit\r")
-            time.sleep(0.3)
-        except Exception:
-            pass
-
         return _clean_ansi(out)
     except Exception:
         return None
+    finally:
+        pty.close()
 
 
 def fetch_claude_data() -> tuple[dict | None, dict | None]:
@@ -754,12 +838,14 @@ class ClaudeWidget(QWidget):
         )
         menu.addAction("Bring to front", self._bring_to_front)
         menu.addAction("Refresh",        self._refresh_all)
-        menu.addSeparator()
-        self._startup_action = menu.addAction("", self._toggle_startup)
+        self._startup_action = None
+        if sys.platform == "win32":
+            menu.addSeparator()
+            self._startup_action = menu.addAction("", self._toggle_startup)
+            menu.aboutToShow.connect(self._update_startup_action)
         menu.addSeparator()
         menu.addAction("Quit",           self._quit)
 
-        menu.aboutToShow.connect(self._update_startup_action)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
