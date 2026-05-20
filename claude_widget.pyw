@@ -72,7 +72,7 @@ PRICE = {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30
 REFRESH_STATS_MS  = 15_000   # JSONL re-scan interval (also fired by file watcher)
 REFRESH_CLAUDE_MS = 180_000  # /usage + /context PTY interval
 
-FONT = "Segoe UI"
+FONT = "Segoe UI" if sys.platform == "win32" else ".AppleSystemUIFont" if sys.platform == "darwin" else "Noto Sans"
 
 C = {
     "bg":      "#0d0d1a",
