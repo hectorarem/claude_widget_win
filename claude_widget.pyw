@@ -10,7 +10,7 @@ Improvements over the tkinter version:
 - Cached results shown instantly on tab switch while refresh runs in background
 """
 from __future__ import annotations
-import ctypes, ctypes.wintypes as wt, json, os, re, sys, time
+import ctypes, ctypes.wintypes as wt, json, os, re, sys, time, winreg
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Thread, Event
@@ -27,6 +27,32 @@ try:
     _WINPTY = True
 except ImportError:
     _WINPTY = False
+
+# ── Startup (registry) ───────────────────────────────────────────────────────
+_RUN_KEY      = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_NAME     = "ClaudeWidget"
+_VBS_LAUNCHER = Path(sys.argv[0]).resolve().parent / "claude_widget.vbs"
+
+def _startup_enabled() -> bool:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY) as k:
+            winreg.QueryValueEx(k, _RUN_NAME)
+            return True
+    except OSError:
+        return False
+
+def _set_startup(enable: bool) -> None:
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY,
+                        access=winreg.KEY_SET_VALUE) as k:
+        if enable:
+            winreg.SetValueEx(k, _RUN_NAME, 0, winreg.REG_SZ,
+                              f'wscript.exe "{_VBS_LAUNCHER}"')
+        else:
+            try:
+                winreg.DeleteValue(k, _RUN_NAME)
+            except OSError:
+                pass
+
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CLAUDE_DIR   = Path.home() / ".claude"
@@ -715,8 +741,11 @@ class ClaudeWidget(QWidget):
         menu.addAction("Bring to front", self._bring_to_front)
         menu.addAction("Refresh",        self._refresh_all)
         menu.addSeparator()
+        self._startup_action = menu.addAction("", self._toggle_startup)
+        menu.addSeparator()
         menu.addAction("Quit",           self._quit)
 
+        menu.aboutToShow.connect(self._update_startup_action)
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
@@ -729,6 +758,14 @@ class ClaudeWidget(QWidget):
     def _refresh_all(self):
         self._do_stats()
         self._do_claude()
+
+    def _update_startup_action(self):
+        self._startup_action.setText(
+            "Remove from startup" if _startup_enabled() else "Add to startup"
+        )
+
+    def _toggle_startup(self):
+        _set_startup(not _startup_enabled())
 
     def _quit(self):
         if hasattr(self, "_watcher"):
