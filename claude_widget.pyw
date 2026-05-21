@@ -66,8 +66,35 @@ def _set_startup(enable: bool) -> None:
 CLAUDE_DIR   = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
+GEOM_FILE    = CLAUDE_DIR / "claude_widget_geom.json"
 
-PRICE = {"input": 3.00, "output": 15.00, "cache_write": 3.75, "cache_read": 0.30}
+RESIZE_GRIP_PX = 16   # bottom-right hit-zone for resizing
+MIN_W, MIN_H   = 180, 200
+
+PRICES = {
+    "opus":   {"input": 15.00, "output": 75.00, "cache_write": 18.75, "cache_read": 1.50},
+    "sonnet": {"input":  3.00, "output": 15.00, "cache_write":  3.75, "cache_read": 0.30},
+    "haiku":  {"input":  1.00, "output":  5.00, "cache_write":  1.25, "cache_read": 0.10},
+}
+PRICE = PRICES["sonnet"]  # default fallback / preserves existing flat-rate behavior
+
+
+def _price_for(model_id: str) -> dict:
+    mid = (model_id or "").lower()
+    for k in ("opus", "sonnet", "haiku"):
+        if k in mid:
+            return PRICES[k]
+    return PRICE
+
+
+def _model_display(model_id: str) -> str:
+    if not model_id:
+        return "Unknown"
+    m = re.match(r"claude-(opus|sonnet|haiku)-(\d+)-?(\d+)?", model_id, re.I)
+    if m:
+        ver = f"{m.group(2)}.{m.group(3)}" if m.group(3) else m.group(2)
+        return f"{m.group(1).title()} {ver}"
+    return model_id
 
 REFRESH_STATS_MS  = 15_000   # JSONL re-scan interval (also fired by file watcher)
 REFRESH_CLAUDE_MS = 180_000  # /usage + /context PTY interval
@@ -202,6 +229,7 @@ def fetch_token_stats() -> dict:
     inp = out = cw = cr = 0
     sessions_today: set = set()
     active_sessions: set = set()
+    by_model: dict[str, dict] = {}
 
     for f in SESSIONS_DIR.glob("*.json"):
         try:
@@ -234,15 +262,33 @@ def fetch_token_stats() -> dict:
                     except Exception:
                         continue
                     sessions_today.add(entry.get("sessionId", ""))
-                    u    = entry.get("message", {}).get("usage", {})
-                    inp += u.get("input_tokens", 0)
-                    out += u.get("output_tokens", 0)
-                    cw  += u.get("cache_creation_input_tokens", 0)
-                    cr  += u.get("cache_read_input_tokens", 0)
+                    msg  = entry.get("message", {}) or {}
+                    u    = msg.get("usage", {}) or {}
+                    e_in = u.get("input_tokens", 0)
+                    e_ou = u.get("output_tokens", 0)
+                    e_cw = u.get("cache_creation_input_tokens", 0)
+                    e_cr = u.get("cache_read_input_tokens", 0)
+                    inp += e_in; out += e_ou; cw += e_cw; cr += e_cr
+
+                    mid = msg.get("model", "") or "unknown"
+                    bm  = by_model.setdefault(
+                        mid, {"inp": 0, "out": 0, "cw": 0, "cr": 0}
+                    )
+                    bm["inp"] += e_in; bm["out"] += e_ou
+                    bm["cw"]  += e_cw; bm["cr"]  += e_cr
         except Exception:
             pass
 
-    cost = (
+    # Cost per model (uses model-specific pricing); global cost = sum of those.
+    for mid, bm in by_model.items():
+        pr = _price_for(mid)
+        bm["cost"] = (
+            bm["inp"] * pr["input"] + bm["out"] * pr["output"]
+            + bm["cw"] * pr["cache_write"] + bm["cr"] * pr["cache_read"]
+        ) / 1_000_000
+        bm["display"] = _model_display(mid)
+
+    cost = sum(bm["cost"] for bm in by_model.values()) if by_model else (
         inp * PRICE["input"] + out * PRICE["output"]
         + cw * PRICE["cache_write"] + cr * PRICE["cache_read"]
     ) / 1_000_000
@@ -251,6 +297,7 @@ def fetch_token_stats() -> dict:
         inp=inp, out=out, cw=cw, cr=cr, cost=cost,
         sessions=len(sessions_today),
         active=len(sessions_today & active_sessions),
+        by_model=by_model,
     )
 
 
@@ -452,7 +499,10 @@ def _run_claude_command(cmd: str, finish_keyword: str,
             pty.write("\r")
 
         _, ready = _pty_read_until_any(
-            pty, ["for shortcuts", "bypass permissions"], timeout=20
+            pty,
+            ["for shortcuts", "bypass permissions",
+             "shift+tab", "for agents", "auto mode"],
+            timeout=20,
         )
         if not ready:
             return None
@@ -511,21 +561,59 @@ class _ClaudeWorker(QThread):
 def _lbl(text: str = "", color: str = "text", size: int = 8,
          bold: bool = False, parent=None) -> QLabel:
     l = QLabel(text, parent)
+    l.setProperty("_kind",  "lbl")
+    l.setProperty("_color", color)
+    l.setProperty("_pt",    size)
+    l.setProperty("_bold",  bold)
+    _restyle_lbl(l, 1.0)
+    return l
+
+
+def _restyle_lbl(l: QLabel, scale: float) -> None:
+    pt   = max(5, int(round(l.property("_pt") * scale)))
+    bold = l.property("_bold")
+    color = l.property("_color")
     l.setStyleSheet(
-        f"color:{C[color]}; font:{'bold ' if bold else ''}{size}pt '{FONT}';"
+        f"color:{C[color]}; font:{'bold ' if bold else ''}{pt}pt '{FONT}';"
         " background:transparent; border:none;"
     )
-    return l
+
+
+def _restyle_tab(btn: QLabel, scale: float) -> None:
+    active = bool(btn.property("_active"))
+    pt   = max(5, int(round(btn.property("_pt") * scale)))
+    pad  = max(2, int(round(2  * scale)))
+    rad  = max(8, int(round(10 * scale)))
+    if active:
+        btn.setStyleSheet(
+            f"color:{C['accent']}; background:rgba(181,123,238,0.18);"
+            f" font:bold {pt}pt '{FONT}'; padding:{pad}px; border-radius:{rad}px;"
+        )
+    else:
+        btn.setStyleSheet(
+            f"color:{C['dim']}; background:transparent;"
+            f" font:{pt}pt '{FONT}'; padding:{pad}px; border-radius:{rad}px;"
+        )
+
+
+def _restyle_bar_pct(l: QLabel, scale: float) -> None:
+    pt    = max(5, int(round(l.property("_pt") * scale)))
+    color = l.property("_color_hex")
+    l.setStyleSheet(
+        f"color:{color}; font:bold {pt}pt '{FONT}'; background:transparent; border:none;"
+    )
 
 
 class _Bar(QWidget):
     """Thin progress bar drawn with QPainter — no stylesheet flickering."""
 
+    BASE_H = 8
+
     def __init__(self, hex_color: str, parent=None):
         super().__init__(parent)
         self._fill = QColor(hex_color)
         self._pct  = 0.0
-        self.setFixedHeight(8)
+        self.setFixedHeight(self.BASE_H)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def set_pct(self, pct: float):
@@ -551,13 +639,18 @@ class ClaudeWidget(QWidget):
     def __init__(self):
         super().__init__()
         self._drag_pos       = None
+        self._resize_start   = None   # (global QPoint, start_w, start_h)
         self._cache_usage    = None
         self._cache_context  = None
+        self._cache_stats    = None
         self._stats_worker   = None
         self._claude_worker  = None
+        self.setMouseTracking(True)
+        self.setMinimumSize(MIN_W, MIN_H)
 
         self._init_window()
         self._build_ui()
+        self._apply_scale()
         self._init_timers()
         self._init_watcher()
         self._init_tray()
@@ -578,9 +671,68 @@ class ClaudeWidget(QWidget):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowOpacity(0.93)
-        self.resize(self.W, self.H)
-        geo = QApplication.primaryScreen().availableGeometry()
-        self.move(geo.right() - self.W - 20, geo.bottom() - self.H - 50)
+
+        saved = self._load_geometry()
+        if saved is not None:
+            x, y, w, h = saved
+            self.resize(max(MIN_W, w), max(MIN_H, h))
+            self.move(x, y)
+        else:
+            self.resize(self.W, self.H)
+            geo = QApplication.primaryScreen().availableGeometry()
+            self.move(geo.right() - self.W - 20, geo.bottom() - self.H - 50)
+
+    @staticmethod
+    def _load_geometry():
+        try:
+            d = json.loads(GEOM_FILE.read_text(encoding="utf-8"))
+            return int(d["x"]), int(d["y"]), int(d["w"]), int(d["h"])
+        except Exception:
+            return None
+
+    def _save_geometry(self):
+        try:
+            GEOM_FILE.parent.mkdir(parents=True, exist_ok=True)
+            GEOM_FILE.write_text(json.dumps({
+                "x": self.x(), "y": self.y(),
+                "w": self.width(), "h": self.height(),
+            }), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _in_resize_zone(self, pos) -> bool:
+        return (self.width()  - pos.x() <= RESIZE_GRIP_PX and
+                self.height() - pos.y() <= RESIZE_GRIP_PX)
+
+    # ── Proportional scaling of text + bar/header heights ────────────────────
+
+    def _scale_factor(self) -> float:
+        # Anchor to default size so bigger window → bigger fonts (and slightly
+        # smaller text if user shrinks the widget, clamped at 0.75).
+        s = min(self.width() / self.W, self.height() / self.H)
+        return max(0.75, s)
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._apply_scale()
+
+    def _apply_scale(self):
+        # Skip until the UI is built (resize fires once during __init__ before _build_ui)
+        if not hasattr(self, "_titlebar"):
+            return
+        s = self._scale_factor()
+        for l in self.findChildren(QLabel):
+            k = l.property("_kind")
+            if k == "lbl":
+                _restyle_lbl(l, s)
+            elif k == "tab":
+                _restyle_tab(l, s)
+            elif k == "bar_pct":
+                _restyle_bar_pct(l, s)
+        for bar in self.findChildren(_Bar):
+            bar.setFixedHeight(max(_Bar.BASE_H, int(round(_Bar.BASE_H * s))))
+        self._titlebar.setFixedHeight(max(32, int(round(32 * s))))
+        self._footer_frame.setFixedHeight(max(22, int(round(22 * s))))
 
     def paintEvent(self, _):
         pass  # required for WA_TranslucentBackground
@@ -602,9 +754,11 @@ class ClaudeWidget(QWidget):
         cl = QVBoxLayout(card)
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
-        cl.addWidget(self._build_titlebar())
+        self._titlebar = self._build_titlebar()
+        self._footer_frame = self._build_footer()
+        cl.addWidget(self._titlebar)
         cl.addWidget(self._build_content(), 1)
-        cl.addWidget(self._build_footer())
+        cl.addWidget(self._footer_frame)
 
     def _build_titlebar(self) -> QFrame:
         bar = QFrame()
@@ -622,12 +776,15 @@ class ClaudeWidget(QWidget):
         self._dot = _lbl("●", "dim", 8)
         hl.addWidget(self._dot)
 
-        self._btn_usage = self._make_tab_btn("Usage",   active=True)
-        self._btn_ctx   = self._make_tab_btn("Context", active=False)
-        self._btn_usage.mousePressEvent = lambda _: self._switch_tab(0)
-        self._btn_ctx.mousePressEvent   = lambda _: self._switch_tab(1)
+        self._btn_usage  = self._make_tab_btn("Usage",   active=True)
+        self._btn_ctx    = self._make_tab_btn("Context", active=False)
+        self._btn_models = self._make_tab_btn("Models",  active=False)
+        self._btn_usage.mousePressEvent  = lambda _: self._switch_tab(0)
+        self._btn_ctx.mousePressEvent    = lambda _: self._switch_tab(1)
+        self._btn_models.mousePressEvent = lambda _: self._switch_tab(2)
         hl.addWidget(self._btn_usage)
         hl.addWidget(self._btn_ctx)
+        hl.addWidget(self._btn_models)
 
         x = _lbl("×", "dim", 14, bold=True)
         x.setContentsMargins(4, 0, 0, 0)
@@ -641,20 +798,15 @@ class ClaudeWidget(QWidget):
     def _make_tab_btn(self, text: str, active: bool) -> QLabel:
         btn = QLabel(text)
         btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        self._style_tab(btn, active)
+        btn.setProperty("_kind",   "tab")
+        btn.setProperty("_pt",     8)
+        btn.setProperty("_active", active)
+        _restyle_tab(btn, self._scale_factor())
         return btn
 
     def _style_tab(self, btn: QLabel, active: bool):
-        if active:
-            btn.setStyleSheet(
-                f"color:{C['accent']}; background:rgba(181,123,238,0.18);"
-                f" font:bold 8pt '{FONT}'; padding:2px; border-radius:10px;"
-            )
-        else:
-            btn.setStyleSheet(
-                f"color:{C['dim']}; background:transparent;"
-                f" font:8pt '{FONT}'; padding:2px; border-radius:10px;"
-            )
+        btn.setProperty("_active", active)
+        _restyle_tab(btn, self._scale_factor())
 
     def _build_content(self) -> QFrame:
         frame = QFrame()
@@ -666,6 +818,7 @@ class ClaudeWidget(QWidget):
         self._stack.setStyleSheet("background:transparent; border:none;")
         self._stack.addWidget(self._build_usage_tab())    # index 0
         self._stack.addWidget(self._build_context_tab())  # index 1
+        self._stack.addWidget(self._build_models_tab())   # index 2
         hl.addWidget(self._stack)
         return frame
 
@@ -713,9 +866,10 @@ class ClaudeWidget(QWidget):
         hl  = QHBoxLayout(hdr); hl.setContentsMargins(0, 0, 0, 0)
         hl.addWidget(_lbl(label, "dim", 7)); hl.addStretch()
         pct = QLabel("—")
-        pct.setStyleSheet(
-            f"color:{hex_color}; font:bold 7pt '{FONT}'; background:transparent; border:none;"
-        )
+        pct.setProperty("_kind",      "bar_pct")
+        pct.setProperty("_color_hex", hex_color)
+        pct.setProperty("_pt",        7)
+        _restyle_bar_pct(pct, self._scale_factor())
         hl.addWidget(pct)
         cl.addWidget(hdr)
 
@@ -775,6 +929,64 @@ class ClaudeWidget(QWidget):
         vl.addStretch()
         return w
 
+    def _build_models_tab(self) -> QWidget:
+        w  = QWidget()
+        vl = QVBoxLayout(w)
+        vl.setContentsMargins(0, 0, 0, 0)
+        vl.setSpacing(2)
+
+        self._models_layout = vl
+        self._models_empty  = _lbl("No model usage today", "dim", 8)
+        vl.addWidget(self._models_empty)
+        vl.addStretch()
+        return w
+
+    def _apply_models(self, by_model: dict):
+        # Drop previously-rendered model rows; keep the empty-state label + final stretch.
+        lay = self._models_layout
+        while lay.count() > 2:
+            item = lay.takeAt(0)
+            if item is None:
+                break
+            wdg = item.widget()
+            if wdg is not None:
+                wdg.setParent(None)
+                wdg.deleteLater()
+
+        items = sorted(by_model.items(), key=lambda kv: kv[1]["cost"], reverse=True)
+        items = [(mid, bm) for mid, bm in items
+                 if bm["inp"] + bm["out"] + bm["cw"] + bm["cr"] > 0]
+
+        self._models_empty.setVisible(not items)
+
+        for i, (mid, bm) in enumerate(items):
+            # Header: model name + cost
+            hdr_row = QFrame()
+            hdr_row.setStyleSheet("background:transparent; border:none;")
+            hr = QHBoxLayout(hdr_row); hr.setContentsMargins(0, 4 if i else 0, 0, 0)
+            hr.addWidget(_lbl(bm["display"], "accent", 9, bold=True))
+            hr.addStretch()
+            hr.addWidget(_lbl(f"${bm['cost']:.4f}", "accent", 8, bold=True))
+            lay.insertWidget(lay.count() - 2, hdr_row)
+
+            # Token rows: input/output/cache w/cache r
+            for key, label, color in [
+                ("inp", "↑  Input",       "text"),
+                ("out", "↓  Output",      "text"),
+                ("cw",  "✎  Cache write", "dim"),
+                ("cr",  "≋  Cache read",  "dim"),
+            ]:
+                row = QFrame(); row.setStyleSheet("background:transparent; border:none;")
+                rl  = QHBoxLayout(row); rl.setContentsMargins(0, 0, 0, 0)
+                ico, _, txt = label.partition(" ")
+                rl.addWidget(_lbl(ico, "accent", 7))
+                rl.addWidget(_lbl(txt.strip(), "dim", 7))
+                rl.addStretch()
+                rl.addWidget(_lbl(f"{bm[key]:,}", color, 7))
+                lay.insertWidget(lay.count() - 2, row)
+
+        self._apply_scale()   # scale the freshly-created rows to current widget size
+
     def _build_footer(self) -> QFrame:
         foot = QFrame()
         foot.setFixedHeight(22)
@@ -782,35 +994,64 @@ class ClaudeWidget(QWidget):
             f"background:{C['bg2']}; border-radius:0 0 8px 8px; border:none;"
         )
         hl = QHBoxLayout(foot); hl.setContentsMargins(8, 0, 8, 0)
+        hl.addStretch(1)
         self._footer = _lbl("Loading…", "dim", 7)
         self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hl.addWidget(self._footer, 0, Qt.AlignmentFlag.AlignCenter)
+        hl.addWidget(self._footer)
+        hl.addStretch(1)
+        grip = _lbl("⇲", "dim", 10)
+        grip.setToolTip("Drag to resize")
+        grip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        hl.addWidget(grip)
         return foot
 
     # ── Tab switch ────────────────────────────────────────────────────────────
 
     def _switch_tab(self, idx: int):
         self._stack.setCurrentIndex(idx)
-        self._style_tab(self._btn_usage, idx == 0)
-        self._style_tab(self._btn_ctx,   idx == 1)
+        self._style_tab(self._btn_usage,  idx == 0)
+        self._style_tab(self._btn_ctx,    idx == 1)
+        self._style_tab(self._btn_models, idx == 2)
         # Show cached data immediately — no waiting
         if idx == 0 and self._cache_usage is not None:
             self._apply_usage(self._cache_usage)
         if idx == 1 and self._cache_context is not None:
             self._apply_context(self._cache_context)
+        if idx == 2 and self._cache_stats is not None:
+            self._apply_models(self._cache_stats.get("by_model", {}))
 
     # ── Drag & menu ───────────────────────────────────────────────────────────
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.LeftButton and e.position().y() <= 32:
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = e.position().toPoint()
+        if self._in_resize_zone(pos):
+            self._resize_start = (e.globalPosition().toPoint(),
+                                  self.width(), self.height())
+        elif pos.y() <= 32:
             self._drag_pos = e.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, e):
+        if self._resize_start and e.buttons() & Qt.MouseButton.LeftButton:
+            g0, w0, h0 = self._resize_start
+            d = e.globalPosition().toPoint() - g0
+            self.resize(max(MIN_W, w0 + d.x()), max(MIN_H, h0 + d.y()))
+            return
         if self._drag_pos and e.buttons() & Qt.MouseButton.LeftButton:
             self.move(e.globalPosition().toPoint() - self._drag_pos)
+            return
+        # No button held → update cursor based on hover zone
+        if self._in_resize_zone(e.position().toPoint()):
+            self.setCursor(QCursor(Qt.CursorShape.SizeFDiagCursor))
+        else:
+            self.unsetCursor()
 
     def mouseReleaseEvent(self, _):
-        self._drag_pos = None
+        if self._drag_pos is not None or self._resize_start is not None:
+            self._save_geometry()
+        self._drag_pos     = None
+        self._resize_start = None
 
     # ── System tray ───────────────────────────────────────────────────────────
 
@@ -963,18 +1204,19 @@ class ClaudeWidget(QWidget):
 
     @pyqtSlot(dict)
     def _on_stats(self, d: dict):
+        self._cache_stats = d
         self._stat["inp"].setText(f"{d['inp']:,}")
         self._stat["out"].setText(f"{d['out']:,}")
         self._stat["cw"].setText(f"{d['cw']:,}")
         self._stat["cr"].setText(f"{d['cr']:,}")
         self._stat["cost"].setText(f"${d['cost']:.4f}")
-        dot_color = C["green"] if d["active"] > 0 else C["dim"]
-        self._dot.setStyleSheet(
-            f"color:{dot_color}; font:8pt '{FONT}'; background:transparent; border:none;"
-        )
+        self._dot.setProperty("_color", "green" if d["active"] > 0 else "dim")
+        _restyle_lbl(self._dot, self._scale_factor())
         ts  = datetime.now().strftime("%H:%M:%S")
         act = f"{d['active']} active" if d["active"] > 0 else "inactive"
         self._footer.setText(f"{ts}  ·  {d['sessions']} session(s)  ·  {act}")
+        if self._stack.currentIndex() == 2:
+            self._apply_models(d.get("by_model", {}))
 
     @pyqtSlot(object)
     def _on_usage(self, data):

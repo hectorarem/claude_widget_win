@@ -49,9 +49,9 @@ The entire application lives in a single file: `claude_widget.pyw`. It is a fram
 
 All colors are in the `C` dict; the font is set by `FONT = "Segoe UI"`. Modify these at the top of the file to restyle the widget.
 
-### PTY ready-keyword
+### PTY ready-keywords
 
-`_run_claude_command()` waits for `"for shortcuts"` in the PTY output before sending a slash command — this is the text Claude Code v2.1+ shows in its status bar once the interactive prompt is ready. If a future Claude Code update breaks PTY communication, check this string first.
+`_run_claude_command()` waits for any of `"for shortcuts"`, `"bypass permissions"`, `"shift+tab"`, `"for agents"`, or `"auto mode"` in the PTY output before sending a slash command — Claude Code rotates the status-bar hint text across versions, so we accept any of the known signals. If a future Claude Code update breaks PTY communication, check this list first against the actual status-bar text.
 
 ### Python version compatibility
 
