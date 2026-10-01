@@ -37,6 +37,10 @@ cd claude_widget_win
 
 **2. Install Python dependencies**
 
+Recommended — [uv](https://docs.astral.sh/uv/): nothing to install manually. Dependencies are declared inline in `claude_widget.pyw` (PEP 723); `uv run --script claude_widget.pyw` builds a cached environment on first launch and reuses it afterwards. The launchers (`.vbs`, `.sh`, `.command`) use uv automatically when it is on `PATH`.
+
+Alternative — pip:
+
 ```bash
 pip install -r requirements.txt
 ```

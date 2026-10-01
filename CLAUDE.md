@@ -5,7 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Running the widget
 
 ```powershell
-# Install dependencies
+# Preferred: uv reads the PEP 723 inline metadata at the top of the script
+uv run --script claude_widget.pyw
+
+# Alternative: install dependencies with pip
 pip install -r requirements.txt
 
 # Run directly (shows a console window briefly)
@@ -33,9 +36,9 @@ The entire application lives in a single file: `claude_widget.pyw`. It is a fram
 
 **`_FileWatcher`** — watches `~/.claude/projects/` for `.jsonl` changes. Falls back through three mechanisms in priority order: `ReadDirectoryChangesW` (ctypes, no extra deps) → `watchdog` → QTimer polling. Emits `ClaudeWidget._file_changed` signal (cross-thread safe). Change bursts are debounced to a single stats refresh via an 800 ms `QTimer`.
 
-**`fetch_token_stats()`** — reads every `.jsonl` file under `~/.claude/projects/`, filters to today's UTC date, sums `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` from assistant messages, and computes a cost estimate using the `PRICE` dict at the top of the file.
+**`fetch_token_stats()`** — incrementally scans `.jsonl` files under `~/.claude/projects/`: files not modified today are skipped, and for the rest only bytes appended since the last scan are parsed (per-file offsets and totals in `_stats_cache`, reset when the UTC date changes). Filters to today's UTC date, sums `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens` from assistant messages, and computes a cost estimate using the `PRICE` dict at the top of the file.
 
-**`_run_claude_command()` / `fetch_claude_data()`** — spawns a `winpty.PTY` running `cmd.exe /c claude`, waits for the interactive prompt, sends a slash command (`/usage` or `/context`), and reads back the ANSI output. Two separate PTY sessions are used because Claude Code does not reliably accept a second slash command in the same session.
+**`_run_claude_command()` / `fetch_usage()` / `fetch_context()`** — spawns a `winpty.PTY` running `cmd.exe /c claude`, waits for the interactive prompt, sends a slash command (`/usage` or `/context`), and reads back the ANSI output. Two separate PTY sessions are used because Claude Code does not reliably accept a second slash command in the same session; `_ClaudeWorker` runs them concurrently. The PTY cwd is passed to `spawn()` rather than set via `os.chdir` so concurrent spawns are thread-safe.
 
 **`_parse_usage()` / `_parse_context()`** — regex parsers that extract structured data from the ANSI-cleaned PTY output.
 
@@ -59,6 +62,7 @@ The file requires `from __future__ import annotations` (first import) to support
 
 ### Windows-specific notes
 
+- The VBS launcher prefers `uv run --script` when `uv` is on `PATH`, falling back to python. Keep the PEP 723 block in sync with `requirements.txt`.
 - The VBS launcher uses `cmd /c start /b python` instead of calling `python` directly. `wscript.exe` cannot resolve Windows Store Python app execution aliases; routing through `cmd.exe` fixes this.
 - `ReadDirectoryChangesW` is called via `ctypes` directly to avoid adding `pywin32` as a dependency.
 - The entry point hides the console window via `GetConsoleWindow` / `ShowWindow` when run as `.pyw`.

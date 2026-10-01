@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "PyQt6>=6.7.0",
+#     "pywinpty==3.0.3; sys_platform == 'win32'",
+#     "watchdog>=6.0.0",
+# ]
+# ///
 """
 Claude Usage Widget — PyQt6 overlay for Windows.
 
@@ -197,12 +205,57 @@ class _FileWatcher:
 
 # ── Token stats ───────────────────────────────────────────────────────────────
 
-def fetch_token_stats() -> dict:
-    today = datetime.now(timezone.utc).date()
-    inp = out = cw = cr = 0
-    sessions_today: set = set()
-    active_sessions: set = set()
+# Per-file incremental cache: path -> {"off", "inp", "out", "cw", "cr", "sids"}.
+# Only bytes appended since the last scan are parsed; files not modified today
+# are skipped without being opened. Reset whenever the UTC date changes.
+# Only touched from _StatsWorker, which never runs concurrently with itself.
+_stats_cache: dict[Path, dict] = {}
+_stats_day = None
 
+
+def _scan_jsonl(path: Path, entry: dict, today_tag: bytes, today) -> None:
+    with open(path, "rb") as fh:
+        fh.seek(entry["off"])
+        data = fh.read()
+    end = data.rfind(b"\n")
+    if end < 0:
+        return                      # no complete line yet — retry next scan
+    entry["off"] += end + 1
+    for raw in data[:end].split(b"\n"):
+        # Cheap byte prefilter before the (expensive) json.loads
+        if b'"assistant"' not in raw or today_tag not in raw:
+            continue
+        try:
+            e = json.loads(raw)
+        except Exception:
+            continue
+        if e.get("type") != "assistant":
+            continue
+        try:
+            dt = datetime.fromisoformat(e.get("timestamp", "").replace("Z", "+00:00"))
+            if dt.date() != today:
+                continue
+        except Exception:
+            continue
+        entry["sids"].add(e.get("sessionId", ""))
+        u = e.get("message", {}).get("usage", {})
+        entry["inp"] += u.get("input_tokens", 0)
+        entry["out"] += u.get("output_tokens", 0)
+        entry["cw"]  += u.get("cache_creation_input_tokens", 0)
+        entry["cr"]  += u.get("cache_read_input_tokens", 0)
+
+
+def fetch_token_stats() -> dict:
+    global _stats_day
+    now   = datetime.now(timezone.utc)
+    today = now.date()
+    if today != _stats_day:
+        _stats_cache.clear()
+        _stats_day = today
+    day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc).timestamp()
+    today_tag = today.isoformat().encode()
+
+    active_sessions: set = set()
     for f in SESSIONS_DIR.glob("*.json"):
         try:
             d   = json.loads(f.read_text(encoding="utf-8"))
@@ -212,35 +265,28 @@ def fetch_token_stats() -> dict:
         except Exception:
             pass
 
+    seen: set = set()
     for jsonl in PROJECTS_DIR.rglob("*.jsonl"):
         try:
-            with open(jsonl, encoding="utf-8", errors="replace") as fh:
-                for raw in fh:
-                    raw = raw.strip()
-                    if not raw:
-                        continue
-                    try:
-                        entry = json.loads(raw)
-                    except Exception:
-                        continue
-                    if entry.get("type") != "assistant":
-                        continue
-                    try:
-                        dt = datetime.fromisoformat(
-                            entry.get("timestamp", "").replace("Z", "+00:00")
-                        )
-                        if dt.date() != today:
-                            continue
-                    except Exception:
-                        continue
-                    sessions_today.add(entry.get("sessionId", ""))
-                    u    = entry.get("message", {}).get("usage", {})
-                    inp += u.get("input_tokens", 0)
-                    out += u.get("output_tokens", 0)
-                    cw  += u.get("cache_creation_input_tokens", 0)
-                    cr  += u.get("cache_read_input_tokens", 0)
+            st = jsonl.stat()
+            if st.st_mtime < day_start:
+                continue            # untouched today → cannot hold today's entries
+            seen.add(jsonl)
+            entry = _stats_cache.get(jsonl)
+            if entry is None or st.st_size < entry["off"]:   # new or truncated
+                entry = _stats_cache[jsonl] = dict(off=0, inp=0, out=0, cw=0, cr=0, sids=set())
+            if st.st_size > entry["off"]:
+                _scan_jsonl(jsonl, entry, today_tag, today)
         except Exception:
             pass
+    for gone in _stats_cache.keys() - seen:
+        del _stats_cache[gone]
+
+    inp = out = cw = cr = 0
+    sessions_today: set = set()
+    for e in _stats_cache.values():
+        inp += e["inp"]; out += e["out"]; cw += e["cw"]; cr += e["cr"]
+        sessions_today |= e["sids"]
 
     cost = (
         inp * PRICE["input"] + out * PRICE["output"]
@@ -354,7 +400,8 @@ def _parse_context(text: str) -> dict:
 class _WinPty:
     def __init__(self):
         self._p = winpty.PTY(220, 50)
-        self._p.spawn("cmd.exe /c claude")
+        # cwd passed explicitly (not os.chdir) so concurrent spawns are thread-safe
+        self._p.spawn("cmd.exe /c claude", cwd=str(Path.home()))
 
     def read(self, blocking=False) -> str:
         chunk = self._p.read(blocking=blocking)
@@ -431,18 +478,7 @@ def _run_claude_command(cmd: str, finish_keyword: str,
     A new PTY is used per command because Claude Code does not reliably accept
     a second slash command in the same interactive session.
     """
-    if sys.platform == "win32":
-        old_cwd = os.getcwd()
-        os.chdir(str(Path.home()))
-
     pty = _make_pty()
-
-    if sys.platform == "win32":
-        try:
-            os.chdir(old_cwd)
-        except Exception:
-            pass
-
     if pty is None:
         return None
 
@@ -469,19 +505,14 @@ def _run_claude_command(cmd: str, finish_keyword: str,
         pty.close()
 
 
-def fetch_claude_data() -> tuple[dict | None, dict | None]:
-    """
-    Fetch /usage and /context using two independent PTY sessions.
+def fetch_usage() -> dict | None:
+    text = _run_claude_command("/usage", "Resets", finish_timeout=12)
+    return _parse_usage(text) if text else None
 
-    Two sessions are needed because Claude Code does not reliably handle a
-    second slash command sent in the same interactive session.
-    """
-    usage_text = _run_claude_command("/usage",   "Resets",     finish_timeout=12)
-    ctx_text   = _run_claude_command("/context", "Autocompact", finish_timeout=25)
 
-    usage = _parse_usage(usage_text)     if usage_text else None
-    ctx   = _parse_context(ctx_text)     if ctx_text   else None
-    return usage, ctx
+def fetch_context() -> dict | None:
+    text = _run_claude_command("/context", "Autocompact", finish_timeout=25)
+    return _parse_context(text) if text else None
 
 
 # ── QThread workers ───────────────────────────────────────────────────────────
@@ -501,9 +532,14 @@ class _ClaudeWorker(QThread):
     context_done = pyqtSignal(object)
 
     def run(self):
-        usage, ctx = fetch_claude_data()
-        self.usage_done.emit(usage)
-        self.context_done.emit(ctx)
+        # Two independent PTY sessions (Claude Code does not reliably accept a
+        # second slash command in one session), run concurrently so the total
+        # wait is max(usage, context) instead of their sum. Each result is
+        # emitted as soon as it is ready.
+        t = Thread(target=lambda: self.usage_done.emit(fetch_usage()), daemon=True)
+        t.start()
+        self.context_done.emit(fetch_context())
+        t.join()
 
 
 # ── Reusable helpers ──────────────────────────────────────────────────────────
